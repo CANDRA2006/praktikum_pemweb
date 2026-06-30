@@ -6,32 +6,36 @@ use App\Http\Controllers\AnggotaController;
 use App\Http\Controllers\TransaksiController;
 use Illuminate\Support\Facades\Route;
 
-// Public routes (tanpa auth)
 Route::get('/', function () {
     return redirect()->route('login');
 });
 
-// Protected routes (dengan auth middleware)
 Route::middleware(['auth'])->group(function () {
-    // Dashboard
     Route::get('/dashboard', function () {
         return view('dashboard');
     })->name('dashboard');
 
-    // Profile
+    Route::resource('buku', BukuController::class);
+    Route::get('/buku/search', [BukuController::class, 'search'])->name('buku.search');
+    Route::get('/buku/kategori/{kategori}', [BukuController::class, 'kategori'])->name('buku.kategori');
+
+    Route::post('/buku/bulk-delete', [BukuController::class, 'bulkDelete'])->name('buku.bulk-delete');
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
 
-    // Buku - CRUD
+    // Buku
     Route::resource('buku', BukuController::class);
+    Route::get('/buku/search', [BukuController::class, 'search'])->name('buku.search');
+    // Rute yang perlu ditambahkan:
+    Route::get('/buku/kategori/{kategori}', [BukuController::class, 'kategori'])->name('buku.kategori');
 
-    // Anggota - CRUD
+    // Anggota
     Route::resource('anggota', AnggotaController::class);
 
-    // Transaksi - CRUD + Custom routes
+    // Transaksi
     Route::resource('transaksi', TransaksiController::class);
     Route::put('/transaksi/{id}/kembalikan', [TransaksiController::class, 'kembalikan'])->name('transaksi.kembalikan');
 });
 
-require __DIR__ . '/auth.php';
+require __DIR__.'/auth.php';

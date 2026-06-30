@@ -2,190 +2,166 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Anggota;
-use App\Models\Buku;
-use App\Models\Transaksi;
 use Illuminate\Http\Request;
-use Illuminate\Support\Carbon;
+use App\Models\Transaksi;
+use App\Models\Buku;
+use App\Models\Anggota;
 use Illuminate\Support\Facades\DB;
-use Barryvdh\DomPDF\Facade\Pdf;
+use Carbon\Carbon;
 
 class TransaksiController extends Controller
 {
-    const LAMA_PINJAM_HARI = 7;
-
-    public function index(Request $request)
+    /**
+     * Display a listing of the resource.
+     */
+    public function index()
     {
-        $query = Transaksi::with(['buku', 'anggota'])->latest();
-
-        if ($request->filled('status')) {
-            $query->where('status', $request->status);
-        }
-
-        $transaksis = $query->get();
+        $transaksis = Transaksi::with(['anggota', 'buku'])
+                               ->latest()
+                               ->get();
 
         return view('transaksi.index', compact('transaksis'));
     }
 
-    public function create(Request $request)
+    /**
+     * Show the form for creating a new resource.
+     */
+    public function create()
     {
-        $bukus = Buku::tersedia()->orderBy('judul')->get();
-        $anggotas = Anggota::aktif()->orderBy('nama')->get();
+        // Get only anggota aktif
+        $anggotas = Anggota::where('status', 'Aktif')->orderBy('nama')->get();
 
-        // Mendukung prefill buku terpilih, misal dari tombol "Pinjam Buku"
-        // di halaman detail buku: route('transaksi.create', ['buku_id' => $buku->id])
-        $selectedBukuId = $request->integer('buku_id') ?: null;
+        // Get only buku yang tersedia (stok > 0)
+        $bukus = Buku::where('stok', '>', 0)->orderBy('judul')->get();
 
-        return view('transaksi.create', compact('bukus', 'anggotas', 'selectedBukuId'));
+        return view('transaksi.create', compact('anggotas', 'bukus'));
     }
 
+    /**
+     * Store a newly created resource in storage.
+     */
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'buku_id' => 'required|exists:buku,id',
+        $request->validate([
             'anggota_id' => 'required|exists:anggota,id',
+            'buku_id' => 'required|exists:buku,id',
             'tanggal_pinjam' => 'required|date',
-            'lama_pinjam' => 'nullable|integer|min:1|max:30',
+            'keterangan' => 'nullable|string',
+        ], [
+            'anggota_id.required' => 'Anggota wajib dipilih.',
+            'buku_id.required' => 'Buku wajib dipilih.',
+            'tanggal_pinjam.required' => 'Tanggal pinjam wajib diisi.',
         ]);
 
-        $buku = Buku::findOrFail($validated['buku_id']);
+        try {
+            DB::transaction(function () use ($request) {
+                // 1. Check stok buku
+                $buku = Buku::findOrFail($request->buku_id);
+                if ($buku->stok <= 0) {
+                    throw new \Exception('Stok buku habis!');
+                }
 
-        if ($buku->stok < 1) {
+                // 2. Generate kode transaksi
+                $kodeTransaksi = $this->generateKodeTransaksi();
+
+                // 3. Calculate tanggal kembali (7 hari dari tanggal pinjam)
+                $tanggalKembali = Carbon::parse($request->tanggal_pinjam)->addDays(7);
+
+                // 4. Create transaksi
+                Transaksi::create([
+                    'kode_transaksi' => $kodeTransaksi,
+                    'anggota_id' => $request->anggota_id,
+                    'buku_id' => $request->buku_id,
+                    'tanggal_pinjam' => $request->tanggal_pinjam,
+                    'tanggal_kembali' => $tanggalKembali,
+                    'status' => 'Dipinjam',
+                    'keterangan' => $request->keterangan,
+                ]);
+
+                // 5. Update stok buku (kurang 1)
+                $buku->decrement('stok');
+            });
+
+            return redirect()->route('transaksi.index')
+                             ->with('success', 'Transaksi peminjaman berhasil dibuat!');
+
+        } catch (\Exception $e) {
             return redirect()->back()
-                ->withInput()
-                ->with('error', 'Stok buku tidak tersedia.');
+                             ->withInput()
+                             ->with('error', 'Gagal membuat transaksi: ' . $e->getMessage());
         }
-
-        DB::transaction(function () use ($validated, $buku) {
-            $tanggalPinjam = Carbon::parse($validated['tanggal_pinjam']);
-            $lamaPinjam = (int) ($validated['lama_pinjam'] ?? self::LAMA_PINJAM_HARI);
-
-            Transaksi::create([
-                'kode_transaksi' => $this->generateKodeTransaksi(),
-                'buku_id' => $buku->id,
-                'anggota_id' => $validated['anggota_id'],
-                'tanggal_pinjam' => $tanggalPinjam,
-                'tanggal_kembali_rencana' => $tanggalPinjam->copy()->addDays($lamaPinjam),
-                'status' => 'Dipinjam',
-                'denda' => 0,
-            ]);
-
-            $buku->decrement('stok');
-        });
-
-        return redirect()->route('transaksi.index')
-            ->with('success', 'Transaksi peminjaman berhasil dibuat.');
     }
 
+    /**
+     * Display the specified resource.
+     */
     public function show(string $id)
     {
-        $transaksi = Transaksi::with(['buku', 'anggota'])->findOrFail($id);
-
+        $transaksi = Transaksi::with(['anggota', 'buku'])->findOrFail($id);
         return view('transaksi.show', compact('transaksi'));
     }
 
     /**
-     * Proses pengembalian buku: hitung denda jika terlambat & tambah stok buku.
+     * Kembalikan buku (update status transaksi).
      */
-    public function kembalikan(Request $request, string $id)
+    public function kembalikan(string $id)
     {
-        $transaksi = Transaksi::with('buku')->findOrFail($id);
-
-        if ($transaksi->status === 'Dikembalikan') {
-            return redirect()->route('transaksi.show', $transaksi->id)
-                ->with('error', 'Transaksi ini sudah dikembalikan sebelumnya.');
-        }
-
         try {
-            DB::transaction(function () use ($transaksi) {
-                $tanggalKembaliAktual = Carbon::today();
+            DB::transaction(function () use ($id) {
+                $transaksi = Transaksi::findOrFail($id);
 
-                // Denda Rp 5.000/hari, hanya jika terlambat
-                $hariTerlambat = 0;
-                if ($tanggalKembaliAktual->gt($transaksi->tanggal_kembali_rencana)) {
-                    $hariTerlambat = $transaksi->tanggal_kembali_rencana->diffInDays($tanggalKembaliAktual);
-                }
-                $denda = $hariTerlambat * Transaksi::DENDA_PER_HARI;
+                // 1. Update transaksi
+                $tanggalDikembalikan = now();
+                $denda = $this->hitungDenda($transaksi, $tanggalDikembalikan);
 
                 $transaksi->update([
-                    'tanggal_kembali_aktual' => $tanggalKembaliAktual,
                     'status' => 'Dikembalikan',
+                    'tanggal_dikembalikan' => $tanggalDikembalikan,
                     'denda' => $denda,
                 ]);
 
-                // Stok buku bertambah 1 saat dikembalikan
-                $transaksi->buku()->increment('stok');
+                // 2. Update stok buku (tambah 1)
+                $transaksi->buku->increment('stok');
             });
 
-            $transaksi->refresh();
+            return redirect()->route('transaksi.show', $id)
+                             ->with('success', 'Buku berhasil dikembalikan!');
 
-            $message = $transaksi->denda > 0
-                ? 'Buku berhasil dikembalikan. Denda terlambat: Rp ' . number_format($transaksi->denda, 0, ',', '.')
-                : 'Buku berhasil dikembalikan tepat waktu.';
-
-            return redirect()->route('transaksi.show', $transaksi->id)->with('success', $message);
         } catch (\Exception $e) {
-            return redirect()->back()->with('error', 'Gagal memproses pengembalian: ' . $e->getMessage());
+            return redirect()->back()
+                             ->with('error', 'Gagal mengembalikan buku: ' . $e->getMessage());
         }
-    }
-
-    /** Laporan transaksi dengan filter tanggal, status, dan anggota. */
-    public function laporan(Request $request)
-    {
-        $transaksis = $this->filteredLaporanQuery($request)->latest()->get();
-
-        $totalTransaksi = $transaksis->count();
-        $totalDenda = $transaksis->sum('denda');
-        $anggotaList = Anggota::orderBy('nama')->get();
-
-        return view('transaksi.laporan', compact('transaksis', 'totalTransaksi', 'totalDenda', 'anggotaList'));
     }
 
     /**
-     * Export laporan ke PDF.
+     * Generate kode transaksi otomatis.
      */
-    public function laporanPdf(Request $request)
+    private function generateKodeTransaksi()
     {
-        $transaksis = $this->filteredLaporanQuery($request)->latest()->get();
+        $lastTransaksi = Transaksi::latest()->first();
 
-        $totalTransaksi = $transaksis->count();
-        $totalDenda = $transaksis->sum('denda');
+        if ($lastTransaksi) {
+            $lastNumber = intval(substr($lastTransaksi->kode_transaksi, -3));
+            $newNumber = $lastNumber + 1;
+        } else {
+            $newNumber = 1;
+        }
 
-        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('transaksi.laporan_pdf', compact(
-            'transaksis', 'totalTransaksi', 'totalDenda'
-        ))->setPaper('a4', 'landscape');
-
-        return $pdf->download('laporan-transaksi-' . now()->format('Y-m-d_His') . '.pdf');
+        return 'TRX-' . str_pad($newNumber, 3, '0', STR_PAD_LEFT);
     }
 
-    private function filteredLaporanQuery(Request $request)
+    /**
+     * Hitung denda keterlambatan.
+     */
+    private function hitungDenda($transaksi, $tanggalDikembalikan)
     {
-        $query = Transaksi::with(['buku', 'anggota']);
+        $hariTerlambat = $transaksi->tanggal_kembali->diffInDays($tanggalDikembalikan, false);
 
-        if ($request->filled('dari_tanggal')) {
-            $query->whereDate('tanggal_pinjam', '>=', $request->dari_tanggal);
+        if ($hariTerlambat > 0) {
+            // Denda Rp 5.000 per hari
+            return $hariTerlambat * 5000;
         }
 
-        if ($request->filled('sampai_tanggal')) {
-            $query->whereDate('tanggal_pinjam', '<=', $request->sampai_tanggal);
-        }
-
-        if ($request->filled('status') && $request->status !== 'Semua') {
-            $query->where('status', $request->status);
-        }
-
-        if ($request->filled('anggota_id')) {
-            $query->where('anggota_id', $request->anggota_id);
-        }
-
-        return $query;
-    }
-
-    private function generateKodeTransaksi(): string
-    {
-        $tanggal = now()->format('Ymd');
-        $jumlahHariIni = Transaksi::whereDate('created_at', now())->count() + 1;
-
-        return 'TRX-' . $tanggal . '-' . str_pad((string) $jumlahHariIni, 3, '0', STR_PAD_LEFT);
+        return 0;
     }
 }

@@ -9,9 +9,6 @@
         Daftar Buku
     </h1>
     <div>
-        <a href="{{ route('buku.export') }}" class="btn btn-success me-2">
-            <i class="bi bi-download"></i> Export CSV
-        </a>
         <a href="{{ route('buku.create') }}" class="btn btn-primary">
             <i class="bi bi-plus-circle"></i> Tambah Buku
         </a>
@@ -284,8 +281,8 @@
             {{-- Checkbox untuk setiap buku --}}
             <div class="col-md-1 d-flex align-items-center">
                 <div class="form-check">
-                    <input class="form-check-input buku-checkbox" type="checkbox" 
-                           name="buku_ids[]" value="{{ $buku->id }}" 
+                    <input class="form-check-input buku-checkbox" type="checkbox"
+                           name="buku_ids[]" value="{{ $buku->id }}"
                            id="buku{{ $buku->id }}">
                 </div>
             </div>

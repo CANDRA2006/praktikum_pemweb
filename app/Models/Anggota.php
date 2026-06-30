@@ -99,6 +99,12 @@ class Anggota extends Model
         return $query->where('jenis_kelamin', $jenisKelamin);
     }
 
+    // Tambahkan method ini di class Anggota
+    public function transaksis()
+    {
+        return $this->hasMany(Transaksi::class);
+    }
+
     public function scopeTerdaftarBulanIni($query)
     {
         return $query->whereMonth('tanggal_daftar', now()->month)

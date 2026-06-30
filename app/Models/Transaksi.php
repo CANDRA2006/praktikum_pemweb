@@ -10,109 +10,66 @@ class Transaksi extends Model
 {
     use HasFactory;
 
-    /**
-     * Denda keterlambatan per hari (Rp).
-     */
-    const DENDA_PER_HARI = 5000;
-
-    /**
-     * Kolom yang dapat diisi secara mass assignment.
-     *
-     * @var array<int, string>
-     */
     protected $fillable = [
         'kode_transaksi',
         'anggota_id',
         'buku_id',
         'tanggal_pinjam',
-        'tanggal_kembali_rencana',
-        'tanggal_kembali_aktual',
+        'tanggal_kembali',
+        'tanggal_dikembalikan',
         'status',
         'denda',
+        'keterangan',
     ];
 
-    /**
-     * Tipe casting untuk atribut.
-     *
-     * @var array<string, string>
-     */
     protected $casts = [
         'tanggal_pinjam' => 'date',
-        'tanggal_kembali_rencana' => 'date',
-        'tanggal_kembali_aktual' => 'date',
-        'denda' => 'integer',
+        'tanggal_kembali' => 'date',
+        'tanggal_dikembalikan' => 'date',
     ];
 
-    /**
-     * Relasi ke Anggota (belongsTo).
-     */
+    // Relationship ke Anggota (belongsTo)
     public function anggota()
     {
         return $this->belongsTo(Anggota::class);
     }
 
-    /**
-     * Relasi ke Buku (belongsTo).
-     */
+    // Relationship ke Buku (belongsTo)
     public function buku()
     {
         return $this->belongsTo(Buku::class);
     }
 
-    /**
-     * Scope untuk filter transaksi yang masih dipinjam.
-     */
-    public function scopeDipinjam($query)
+    // Accessor untuk durasi peminjaman (hari)
+    public function getDurasiPeminjamanAttribute()
     {
-        return $query->where('status', 'Dipinjam');
+        if ($this->tanggal_dikembalikan) {
+            return $this->tanggal_pinjam->diffInDays($this->tanggal_dikembalikan);
+        }
+        return $this->tanggal_pinjam->diffInDays(now());
     }
 
-    /**
-     * Scope untuk filter transaksi yang sudah dikembalikan.
-     */
-    public function scopeDikembalikan($query)
+    // Accessor untuk cek terlambat (hari)
+    public function getTerlambatAttribute()
     {
-        return $query->where('status', 'Dikembalikan');
-    }
-
-    /**
-     * Scope untuk filter transaksi yang sudah melewati tanggal kembali rencana
-     * namun belum dikembalikan (terlambat).
-     */
-    public function scopeTerlambat($query)
-    {
-        return $query->where('status', 'Dipinjam')
-            ->whereDate('tanggal_kembali_rencana', '<', Carbon::today());
-    }
-
-    /**
-     * Accessor: jumlah hari keterlambatan (0 jika tidak terlambat).
-     */
-    public function getHariTerlambatAttribute(): int
-    {
-        $pembanding = $this->tanggal_kembali_aktual ?? Carbon::today();
-
-        if ($pembanding->lte($this->tanggal_kembali_rencana)) {
+        if ($this->status == 'Dikembalikan') {
+            if ($this->tanggal_dikembalikan > $this->tanggal_kembali) {
+                return $this->tanggal_kembali->diffInDays($this->tanggal_dikembalikan);
+            }
             return 0;
         }
 
-        return $this->tanggal_kembali_rencana->diffInDays($pembanding);
+        if (now() > $this->tanggal_kembali) {
+            return $this->tanggal_kembali->diffInDays(now());
+        }
+
+        return 0;
     }
 
-    /**
-     * Accessor: format denda ke Rupiah.
-     */
-    public function getDendaFormatAttribute(): string
+    // Accessor untuk status badge HTML
+    public function getStatusBadgeAttribute()
     {
-        return 'Rp ' . number_format($this->denda, 0, ',', '.');
-    }
-
-    /**
-     * Accessor: badge HTML untuk status transaksi.
-     */
-    public function getStatusBadgeAttribute(): string
-    {
-        return $this->status === 'Dipinjam'
+        return $this->status == 'Dipinjam'
             ? '<span class="badge bg-warning text-dark">Dipinjam</span>'
             : '<span class="badge bg-success">Dikembalikan</span>';
     }
